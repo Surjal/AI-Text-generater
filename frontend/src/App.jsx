@@ -15,6 +15,10 @@ import SpacedRepetition from "./pages/SpacedRepetition.jsx";
 import Export from "./pages/Export.jsx";
 import { clearSession, loadSession, saveSession } from "./utils/authStorage.js";
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
+
+axios.defaults.baseURL = API_BASE_URL;
+
 function ProtectedRoute({ auth, children, adminOnly = false }) {
   if (!auth?.token) {
     return <Navigate to="/login" replace />;
@@ -79,7 +83,7 @@ export default function App() {
     <BrowserRouter>
       <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-900">
         <Navbar auth={auth} onLogout={handleLogout} />
-        <main className="flex-grow">
+        <main className="grow">
           {loadingProfile ? (
             <div className="flex items-center justify-center h-[60vh]">
               <div className="flex flex-col items-center gap-4">

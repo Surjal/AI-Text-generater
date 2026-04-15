@@ -1347,7 +1347,8 @@ export default function Chatbot({ auth }) {
                         </div>
                         <button
                           onClick={submitQuizAttempt}
-                          className="px-5 py-3 bg-primary-600 text-white font-bold rounded-xl hover:bg-primary-700 transition-all active:scale-95"
+                          disabled={!currentHistoryId}
+                          className="px-5 py-3 bg-slate-900 text-white font-bold rounded-xl border border-slate-900 hover:bg-slate-800 transition-all active:scale-95 disabled:bg-slate-200 disabled:text-slate-500 disabled:border-slate-200 disabled:cursor-not-allowed"
                         >
                           Save Quiz Attempt
                         </button>
