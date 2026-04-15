@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, g, jsonify, request
 
@@ -15,15 +16,17 @@ from utils.preprocess import ensure_nltk_resources
 from utils.pdf_extract import extract_text_from_pdf
 from utils.summarizer import summarize_text
 from utils.ielts_mcq import format_questions, generate_mcqs
-from utils.question_generator import generate_fill_blank_items, generate_mcq_items
+from utils.question_generator import generate_fill_blank_items, generate_mcq_items, generate_questions
 from utils.key_extraction import extract_keywords, extract_key_points
 from utils.features import AnalyticsEngine, AdaptiveQuizzesEngine, ExplanationGenerator, RecommendationEngine, ExportManager
+from utils.ai_service import AIService
 
 
 app = Flask(__name__)
 app.config.from_object(Config)
 
 db = DatabaseManager()
+executor = ThreadPoolExecutor(max_workers=4)
 
 def _parse_bool(val, default: bool = False) -> bool:
     if val is None:
@@ -133,25 +136,19 @@ def generate_topic(text: str, keywords: list[str]) -> str:
     return words[0].capitalize() if words else "General"
 
 
-def extract_word_frequency(text: str, top_n: int = 12) -> list[dict[str, object]]:
-    counts: dict[str, int] = {}
-    for word in re.findall(r"\w+", text.lower()):
-        if len(word) < 3:
-            continue
-        counts[word] = counts.get(word, 0) + 1
-    sorted_words = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-    return [{"word": word, "count": count} for word, count in sorted_words[:top_n]]
-
-
-def compute_sentence_scores(text: str, keywords: list[str]) -> list[dict[str, object]]:
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
-    keyword_set = {k.lower() for k in keywords}
-    scores = []
-    for sentence in sentences:
-        words = [w.lower() for w in re.findall(r"\w+", sentence)]
-        score = sum(1 for w in words if w in keyword_set) + len(words) / 20
-        scores.append({"sentence": sentence, "score": round(score, 2)})
-    return scores
+def background_generate_embedding(history_id: str, text: str):
+    """Generate embedding in background to avoid blocking main thread."""
+    embedding = AIService.get_embedding(text)
+    if embedding:
+        conn = db._get_connection()
+        try:
+            import json
+            import sqlite3
+            embedding_blob = sqlite3.Binary(json.dumps(embedding).encode())
+            conn.execute('UPDATE history SET embedding = ? WHERE id = ?', (embedding_blob, history_id))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def sanitize_user(user: dict) -> dict:
@@ -163,6 +160,8 @@ def sanitize_user(user: dict) -> dict:
     }
 
 
+# ==================== Core NLP Routes ====================
+
 @app.route("/process-text", methods=["POST", "OPTIONS"])
 def process_text():
     if request.method == "OPTIONS":
@@ -172,12 +171,14 @@ def process_text():
     summary_sentences = 3
     mcq_count = 5
     fill_blank_count = 5
+    difficulty = "medium"
     include_keywords = True
 
     if request.content_type and "multipart/form-data" in request.content_type:
         summary_sentences = request.form.get("summary_sentences", 3)
         mcq_count = request.form.get("mcq_count", 5)
         fill_blank_count = request.form.get("fill_blank_count", 5)
+        difficulty = request.form.get("difficulty", "medium")
         include_keywords = _parse_bool(request.form.get("include_keywords"), True)
         text = (request.form.get("text") or "").strip()
         upload = request.files.get("file")
@@ -185,146 +186,53 @@ def process_text():
             try:
                 text = extract_text_from_pdf(upload.stream)
             except Exception as e:
-                return (
-                    jsonify(
-                        {
-                            "summary": "",
-                            "mcq_items": [],
-                            "fill_blank_items": [],
-                            "keywords": [],
-                            "key_points": [],
-                            "error": f"Could not read PDF: {e!s}",
-                        }
-                    ),
-                    400,
-                )
+                return jsonify({"error": f"Could not read PDF: {e!s}"}), 400
     else:
         payload = request.get_json(silent=True) or {}
         text = (payload.get("text") or "").strip()
         summary_sentences = payload.get("summary_sentences", 3)
         mcq_count = payload.get("mcq_count", 5)
         fill_blank_count = payload.get("fill_blank_count", 5)
+        difficulty = payload.get("difficulty", "medium")
         include_keywords = _parse_bool(payload.get("include_keywords"), True)
 
     try:
         summary_sentences = int(summary_sentences)
-    except Exception:
-        summary_sentences = 3
-
-    try:
         mcq_count = int(mcq_count)
-    except Exception:
-        mcq_count = 5
-
-    try:
         fill_blank_count = int(fill_blank_count)
     except Exception:
-        fill_blank_count = 5
-
-    summary_sentences = min(20, max(1, summary_sentences))
-    mcq_count = min(20, max(0, mcq_count))
-    fill_blank_count = min(20, max(0, fill_blank_count))
+        pass
 
     if not text:
-        return (
-            jsonify(
-                {
-                    "summary": "",
-                    "mcq_items": [],
-                    "fill_blank_items": [],
-                    "keywords": [],
-                    "key_points": [],
-                    "error": "Add text or upload a PDF with extractable text.",
-                }
-            ),
-            400,
-        )
-
-    if len(text) < 10:
-        return jsonify(
-            {
-                "summary": text,
-                "mcq_items": [],
-                "fill_blank_items": [],
-                "keywords": [],
-                "key_points": [],
-                "note": "Input text is too short.",
-            }
-        )
+        return jsonify({"error": "Add text or upload a PDF."}), 400
 
     db.increment_stat("requests")
     db.increment_stat("summaries")
     db.increment_stat("words_processed", len(re.findall(r"\w+", text)))
-    db.increment_stat("documents_processed")
 
     summary = summarize_text(text, summary_sentences=summary_sentences)
-    # Keep the current IELTS-style questions, then top up with the broader generator if needed.
-    mcq_items = generate_mcqs(text, mcq_count) if mcq_count > 0 else []
-    if len(mcq_items) < mcq_count:
-        seen_questions = {
-            str(item.get("question", "")).strip().lower() for item in mcq_items
-        }
-        for item in generate_mcq_items(text, mcq_count - len(mcq_items)):
-            question_text = str(item.get("question", "")).strip()
-            if not question_text or question_text.lower() in seen_questions:
-                continue
-            mcq_items.append(item)
-            seen_questions.add(question_text.lower())
-            if len(mcq_items) >= mcq_count:
-                break
-    for item in mcq_items:
-        try:
-            correct_index = int(item.get("correct_index", 0))
-        except Exception:
-            correct_index = 0
-        item["correct_index"] = correct_index
-        item["correct_letter"] = chr(ord("A") + correct_index) if 0 <= correct_index < 26 else "A"
-        item.setdefault("answer_text", item.get("answer", ""))
-    fill_blank_items = generate_fill_blank_items(summary, fill_blank_count) if fill_blank_count > 0 else []
+    mcq_items = generate_mcq_items(text, mcq_count, difficulty)
+    fill_blank_items = generate_fill_blank_items(summary, fill_blank_count)
     db.increment_stat("questions_generated", len(mcq_items) + len(fill_blank_items))
 
-    keywords: list = []
-    key_points: list = []
-    if include_keywords:
-        keywords = extract_keywords(text, top_n=15)
-        key_points = extract_key_points(text, max_points=5)
+    keywords = extract_keywords(text, top_n=15) if include_keywords else []
+    key_points = extract_key_points(text, max_points=5) if include_keywords else []
 
     title = generate_title(text, summary)
     topic = generate_topic(text, keywords)
-    sentence_scores = compute_sentence_scores(text, keywords)
-    word_frequency = extract_word_frequency(text)
 
-    # Format MCQs
-    mcq_text = format_questions(mcq_items) if mcq_items else ""
+    return jsonify({
+        "summary": summary,
+        "title": title,
+        "topic": topic,
+        "mcq_items": mcq_items,
+        "fill_blank_items": fill_blank_items,
+        "keywords": keywords,
+        "key_points": key_points,
+    })
 
-    # Format Fill in the Blanks
-    fib_text = ""
-    if fill_blank_items:
-        fib_lines = ["Fill in the Blanks:"]
-        for i, item in enumerate(fill_blank_items, 1):
-            prompt = item["prompt"]
-            answer = item["answer"]
-            fib_lines.append(f"{i}. {prompt}")
-            fib_lines.append(f"   Answer: {answer}")
-            fib_lines.append("")
-        fib_text = "\n".join(fib_lines).strip()
 
-    return jsonify(
-        {
-            "summary": summary,
-            "title": title,
-            "topic": topic,
-            "sentence_scores": sentence_scores,
-            "word_frequency": word_frequency,
-            "mcq_text": mcq_text,
-            "fib_text": fib_text,
-            "mcq_items": mcq_items,
-            "fill_blank_items": fill_blank_items,
-            "keywords": keywords,
-            "key_points": key_points,
-        }
-    )
-
+# ==================== Auth Routes ====================
 
 @app.route("/auth/signup", methods=["POST", "OPTIONS"])
 def signup():
@@ -384,6 +292,8 @@ def me():
     return jsonify({"user": sanitize_user(g.current_user)})
 
 
+# ==================== History & Search ====================
+
 @app.route("/user/history", methods=["GET", "POST", "OPTIONS"])
 @login_required
 def user_history():
@@ -394,7 +304,8 @@ def user_history():
         return jsonify({"history": db.get_history(g.current_user['username'])})
 
     payload = request.get_json(silent=True) or {}
-    entry_id = (payload.get("id") or secrets.token_hex(8)).strip() if isinstance(payload.get("id"), str) else secrets.token_hex(8)
+    entry_id = payload.get("id") or secrets.token_hex(8)
+    
     entry = {
         "id": entry_id,
         "created_at": time.time(),
@@ -407,103 +318,101 @@ def user_history():
         "mcq_items": payload.get("mcq_items", []),
         "fill_blank_items": payload.get("fill_blank_items", []),
     }
+    
     db.add_history(g.current_user['username'], entry)
     db.add_spaced_repetition(g.current_user['username'], entry["id"])
+    
+    executor.submit(background_generate_embedding, entry_id, f"{entry['title']} {entry['summary']}")
+    
     return jsonify({"entry": entry})
 
 
-@app.route("/admin/users", methods=["GET", "OPTIONS"])
-@admin_required
-def admin_users():
-    users = [sanitize_user(user) for user in db.get_all_users()]
-    return jsonify({"users": users})
-
-
-@app.route("/admin/block", methods=["POST", "OPTIONS"])
-@admin_required
-def admin_block_user():
-    if request.method == "OPTIONS":
-        return jsonify({"ok": True})
-
-    payload = request.get_json(silent=True) or {}
-    username = (payload.get("username") or "").strip().lower()
-    blocked = bool(payload.get("blocked", False))
-
-    user = db.get_user(username)
-    if not user:
-        return jsonify({"error": "User not found."}), 404
-    if username == "admin":
-        return jsonify({"error": "Cannot block the admin user."}), 400
-
-    db.update_user_status(username, blocked)
-    # If blocked, we should probably delete their tokens to force logout.
-    # For simplicity, we'll let the next token check handle it since get_current_user checks blocked status.
-    
-    updated_user = db.get_user(username)
-    return jsonify({"user": sanitize_user(updated_user)})
-
-
-@app.route("/admin/delete", methods=["POST", "OPTIONS"])
-@admin_required
-def admin_delete_user():
-    if request.method == "OPTIONS":
-        return jsonify({"ok": True})
-
-    payload = request.get_json(silent=True) or {}
-    username = (payload.get("username") or "").strip().lower()
-
-    user = db.get_user(username)
-    if not user:
-        return jsonify({"error": "User not found."}), 404
-    if username == "admin":
-        return jsonify({"error": "Cannot delete the admin user."}), 400
-
-    db.delete_user(username)
-    return jsonify({"ok": True})
-
-
-@app.route("/admin/stats", methods=["GET", "OPTIONS"])
-@admin_required
-def admin_stats():
-    users = db.get_all_users()
-    total_users = len(users)
-    blocked_users = sum(1 for user in users if user.get("blocked"))
-    
-    stats = db.get_stats()
-    average_summary = (
-        stats["words_processed"] / stats["summaries"] if stats["summaries"] else 0
-    )
-    
-    return jsonify(
-        {
-            "total_users": total_users,
-            "blocked_users": blocked_users,
-            "active_users": total_users - blocked_users,
-            "requests": stats["requests"],
-            "summaries": stats["summaries"],
-            "documents_processed": stats["documents_processed"],
-            "questions_generated": stats["questions_generated"],
-            "words_processed": stats["words_processed"],
-            "average_words_per_summary": round(average_summary, 1),
-        }
-    )
-
-
-# ==================== NEW FEATURES: Analytics, Adaptive Learning, etc. ====================
-
-@app.route("/api/analytics", methods=["GET", "OPTIONS"])
+@app.route("/api/search", methods=["POST", "OPTIONS"])
 @login_required
-def get_analytics():
-    """Feature 3: Get comprehensive learning analytics"""
+def search_concepts():
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True})
+    
+    payload = request.get_json(silent=True) or {}
+    query = payload.get("query", "").strip()
+    if not query:
+        return jsonify({"error": "Search query is required"}), 400
+    
+    query_embedding = AIService.get_embedding(query)
+    if not query_embedding:
+        return jsonify({"error": "Could not generate search embedding"}), 500
+    
+    results = db.semantic_search(g.current_user['username'], query_embedding)
+    return jsonify({"results": results})
+
+
+# ==================== Adaptive Learning & Spaced Repetition ====================
+
+@app.route("/api/spaced-review", methods=["GET", "POST", "OPTIONS"])
+@login_required
+def spaced_repetition_route():
     if request.method == "OPTIONS":
         return jsonify({"ok": True})
     
     username = g.current_user['username']
     
-    # Get analytics
-    analytics = db.get_performance_analytics(username)
+    if request.method == "GET":
+        due_items = db.get_due_for_review(username)
+        return jsonify({"due_for_review": due_items})
     
-    # Get attempts for velocity calculation
+    else:
+        payload = request.get_json(silent=True) or {}
+        sr_id = payload.get("spaced_repetition_id")
+        quality = payload.get("quality", 3)
+        
+        db.update_spaced_repetition(sr_id, quality)
+        return jsonify({"updated": True})
+
+
+@app.route("/api/quiz-attempt", methods=["POST", "OPTIONS"])
+@login_required
+def submit_quiz_attempt():
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True})
+    
+    payload = request.get_json(silent=True) or {}
+    username = g.current_user['username']
+    
+    history_id = payload.get("history_id")
+    score = payload.get("score", 0)
+    correct_answers = payload.get("correct_answers", 0)
+    total_questions = payload.get("total_questions", 1)
+    time_taken = payload.get("time_taken_seconds", 0)
+    
+    recent_attempts = db.get_quiz_attempts(username, history_id)
+    new_difficulty = AdaptiveQuizzesEngine.adjust_difficulty(
+        (correct_answers / total_questions * 100) if total_questions > 0 else 0,
+        recent_attempts[0]['difficulty_level'] if recent_attempts else "medium"
+    )
+    
+    attempt_id = db.add_quiz_attempt(
+        username, history_id, score, total_questions, correct_answers, time_taken,
+        new_difficulty, payload.get("is_timed", False), payload.get("time_limit_seconds")
+    )
+    
+    for q_data in payload.get("question_performance", []):
+        db.add_question_performance(
+            username, attempt_id, q_data['index'], q_data['question'],
+            q_data['correct'], q_data.get('user_answer', ''),
+            q_data.get('correct_answer', ''), difficulty_rating=q_data.get('difficulty', 3)
+        )
+    
+    return jsonify({"attempt_id": attempt_id, "new_difficulty": new_difficulty})
+
+
+@app.route("/api/analytics", methods=["GET", "OPTIONS"])
+@login_required
+def get_analytics():
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True})
+    
+    username = g.current_user['username']
+    analytics = db.get_performance_analytics(username)
     attempts = db.get_quiz_attempts(username)
     velocity = AnalyticsEngine.compute_learning_velocity(attempts)
     heatmap = AnalyticsEngine.compute_strength_weakness_heatmap(analytics)
@@ -516,158 +425,57 @@ def get_analytics():
     })
 
 
-@app.route("/api/quiz-attempt", methods=["POST", "OPTIONS"])
-@login_required
-def submit_quiz_attempt():
-    """Feature 1, 3, 5: Submit a quiz attempt with performance data"""
-    if request.method == "OPTIONS":
-        return jsonify({"ok": True})
-    
-    payload = request.get_json(silent=True) or {}
-    username = g.current_user['username']
-    
-    history_id = payload.get("history_id")
-    score = payload.get("score", 0)
-    correct_answers = payload.get("correct_answers", 0)
-    total_questions = payload.get("total_questions", 1)
-    time_taken = payload.get("time_taken_seconds", 0)
-    is_timed = payload.get("is_timed", False)
-    
-    # Calculate adaptive difficulty
-    recent_attempts = db.get_quiz_attempts(username, history_id)
-    new_difficulty = AdaptiveQuizzesEngine.adjust_difficulty(
-        (correct_answers / total_questions * 100) if total_questions > 0 else 0,
-        recent_attempts[0]['difficulty_level'] if recent_attempts else "medium"
-    )
-    
-    # Add attempt
-    attempt_id = db.add_quiz_attempt(
-        username, history_id, score, total_questions, correct_answers, time_taken,
-        new_difficulty, is_timed, payload.get("time_limit_seconds")
-    )
-    
-    # Store question performance
-    for q_data in payload.get("question_performance", []):
-        db.add_question_performance(
-            username, attempt_id, q_data['index'], q_data['question'],
-            q_data['correct'], q_data.get('user_answer', ''),
-            q_data.get('correct_answer', ''), difficulty_rating=q_data.get('difficulty', 3)
-        )
-    
-    # Generate recommendation
-    analytics = db.get_performance_analytics(username)
-    recommendations = RecommendationEngine.generate_recommendations(analytics, db.get_history(username))
-    for rec in recommendations[:2]:
-        db.add_recommendation(username, rec['topic'], rec['reason'], rec['difficulty'], rec['priority_score'])
-    
-    return jsonify({"attempt_id": attempt_id, "new_difficulty": new_difficulty})
-
-
 @app.route("/api/recommendations", methods=["GET", "OPTIONS"])
 @login_required
 def get_recommendations():
-    """Feature 6: Get personalized study recommendations"""
     if request.method == "OPTIONS":
         return jsonify({"ok": True})
-    
+
     username = g.current_user['username']
-    recommendations = db.get_recommendations(username, limit=10)
-    
-    # Also compute real-time recommendations
+
+    # Previously saved recommendations from DB.
+    saved = db.get_recommendations(username, limit=10)
+
+    # Real-time recommendations generated from recent analytics + history.
     analytics = db.get_performance_analytics(username)
     history = db.get_history(username, limit=20)
-    real_time_recs = RecommendationEngine.generate_recommendations(analytics, history)
-    
+    dynamic = RecommendationEngine.generate_recommendations(analytics, history)
+
     return jsonify({
-        "saved_recommendations": [dict(r) for r in recommendations],
-        "dynamic_recommendations": real_time_recs
+        "saved_recommendations": [dict(r) for r in saved],
+        "dynamic_recommendations": dynamic,
     })
 
 
-@app.route("/api/spaced-review", methods=["GET", "POST", "OPTIONS"])
+@app.route("/api/explanations", methods=["POST", "OPTIONS"])
 @login_required
-def spaced_repetition():
-    """Feature 1: Spaced repetition schedule and review"""
-    if request.method == "OPTIONS":
-        return jsonify({"ok": True})
-    
-    username = g.current_user['username']
-    
-    if request.method == "GET":
-        due_items = db.get_due_for_review(username)
-        return jsonify({"due_for_review": [dict(item) for item in due_items]})
-    
-    else:  # POST - update spaced repetition
-        payload = request.get_json(silent=True) or {}
-        sr_id = payload.get("spaced_repetition_id")
-        correct = payload.get("correct", False)
-        
-        db.update_spaced_repetition(sr_id, correct)
-        
-        return jsonify({"updated": True})
-
-
-@app.route("/api/explanations", methods=["GET", "POST", "OPTIONS"])
-@login_required
-def handle_explanations():
-    """Feature 9: Get/generate detailed answer explanations"""
+def generate_explanation_route():
     if request.method == "OPTIONS":
         return jsonify({"ok": True})
     
     payload = request.get_json(silent=True) or {}
-    history_id = payload.get("history_id")
+    question = payload.get("question", "")
+    correct_answer = payload.get("correct_answer", "")
+    user_answer = payload.get("user_answer", "")
+    context = payload.get("context", "")
     
-    if request.method == "GET":
-        explanations = db.get_explanations(history_id) if history_id else []
-        return jsonify({"explanations": explanations})
-    
-    else:  # POST - generate explanation
-        question = payload.get("question", "")
-        correct_answer = payload.get("correct_answer", "")
-        user_answer = payload.get("user_answer", "")
-        context = payload.get("context", "")
-        
-        # Generate explanation using AI
-        explanation_data = ExplanationGenerator.generate_explanation(
-            question, correct_answer, user_answer, context
-        )
-        
-        # Store explanation
-        exp_id = db.add_explanation(history_id, payload.get("question_index", 0), question,
-                                   explanation_data['explanation'],
-                                   [explanation_data['misconception']])
-        
-        return jsonify({"explanation_id": exp_id, **explanation_data})
+    explanation_data = AIService.generate_explanation(question, correct_answer, user_answer, context)
+    return jsonify(explanation_data)
 
 
-@app.route("/api/export", methods=["POST", "OPTIONS"])
-@login_required
-def export_study_material():
-    """Feature 7: Export study material in multiple formats"""
-    if request.method == "OPTIONS":
-        return jsonify({"ok": True})
-    
-    payload = request.get_json(silent=True) or {}
-    export_format = payload.get("format", "markdown")  # markdown, anki, json
-    title = payload.get("title", "Study Material")
-    summary = payload.get("summary", "")
-    mcq_items = payload.get("mcq_items", [])
-    fill_blank_items = payload.get("fill_blank_items", [])
-    
-    if export_format == "markdown":
-        content = ExportManager.export_to_markdown(title, summary, mcq_items, fill_blank_items)
-        return jsonify({"format": "markdown", "content": content, "filename": f"{title}.md"})
-    
-    elif export_format == "anki":
-        content = ExportManager.export_to_anki_format(mcq_items, fill_blank_items)
-        return jsonify({"format": "anki", "content": content, "filename": f"{title}.csv"})
-    
-    elif export_format == "json":
-        content = ExportManager.export_to_json(title, summary, mcq_items, fill_blank_items)
-        return jsonify({"format": "json", "content": content, "filename": f"{title}.json"})
-    
-    else:
-        return jsonify({"error": "Unsupported export format"}), 400
+# ==================== Admin & Stats ====================
+
+@app.route("/admin/stats", methods=["GET", "OPTIONS"])
+@admin_required
+def admin_stats():
+    users = db.get_all_users()
+    stats = db.get_stats()
+    return jsonify({
+        "total_users": len(users),
+        "requests": stats["requests"],
+        "summaries": stats["summaries"],
+        "questions_generated": stats["questions_generated"],
+    })
 
 
 if __name__ == "__main__":

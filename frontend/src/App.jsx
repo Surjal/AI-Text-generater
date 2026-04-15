@@ -13,6 +13,7 @@ import Analytics from "./pages/Analytics.jsx";
 import Recommendations from "./pages/Recommendations.jsx";
 import SpacedRepetition from "./pages/SpacedRepetition.jsx";
 import Export from "./pages/Export.jsx";
+import SearchPage from "./pages/Search.jsx";
 import { clearSession, loadSession, saveSession } from "./utils/authStorage.js";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
@@ -159,6 +160,14 @@ export default function App() {
                   element={
                     <ProtectedRoute auth={auth}>
                       <Export />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/search"
+                  element={
+                    <ProtectedRoute auth={auth}>
+                      <SearchPage />
                     </ProtectedRoute>
                   }
                 />

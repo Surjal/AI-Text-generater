@@ -5,7 +5,8 @@ from typing import List
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from .preprocess import sentence_tokenize, preprocess_sentence_tokens, preprocess_sentence_text
+from .preprocess import sentence_tokenize, preprocess_sentence_text
+from .ai_service import AIService
 
 
 def _score_sentences_tf_idf(sentences: List[str]) -> np.ndarray:
@@ -25,9 +26,11 @@ def _score_sentences_tf_idf(sentences: List[str]) -> np.ndarray:
     return np.asarray(scores).ravel()
 
 
-def summarize_text(text: str, summary_sentences: int = 3) -> str:
+def summarize_text(text: str, summary_sentences: int = 3, hybrid: bool = True) -> str:
     """
-    Extractive summarization using TF-IDF sentence scoring.
+    Summarization using a hybrid approach:
+    1. Extract top sentences via TF-IDF (Extractive).
+    2. Enhance/Refine via LLM (Abstractive) if available.
     """
     summary_sentences = min(20, max(1, int(summary_sentences)))
     sentences = sentence_tokenize(text)
@@ -36,13 +39,27 @@ def summarize_text(text: str, summary_sentences: int = 3) -> str:
         return ""
 
     if len(sentences) <= summary_sentences:
-        return " ".join(sentences).strip()
+        extractive_summary = " ".join(sentences).strip()
+    else:
+        scores = _score_sentences_tf_idf(sentences)
+        top_indices = np.argsort(scores)[::-1][:summary_sentences * 2] # Get more for context
+        top_indices_sorted = sorted(top_indices.tolist())
+        extractive_summary = " ".join([sentences[i] for i in top_indices_sorted]).strip()
 
-    scores = _score_sentences_tf_idf(sentences)
-    top_indices = np.argsort(scores)[::-1][:summary_sentences]
+    if hybrid:
+        # Try LLM abstractive summarization
+        # Use the extractive summary as a condensed input to save tokens if text is long
+        input_for_llm = extractive_summary if len(text) > 4000 else text
+        abstractive = AIService.summarize(input_for_llm, summary_sentences)
+        if abstractive:
+            return abstractive
 
-    # Keep the original order for readability.
-    top_indices_sorted = sorted(top_indices.tolist())
-    selected = [sentences[i] for i in top_indices_sorted]
-    return " ".join(selected).strip()
+    # Fallback to extractive
+    if len(sentences) > summary_sentences:
+        scores = _score_sentences_tf_idf(sentences)
+        top_indices = np.argsort(scores)[::-1][:summary_sentences]
+        top_indices_sorted = sorted(top_indices.tolist())
+        extractive_summary = " ".join([sentences[i] for i in top_indices_sorted]).strip()
+        
+    return extractive_summary
 

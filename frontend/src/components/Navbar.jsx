@@ -110,6 +110,9 @@ export default function Navbar({ auth, onLogout }) {
                 <NavLink to="/export" active={isActive("/export")}>
                   Export
                 </NavLink>
+                <NavLink to="/search" active={isActive("/search")}>
+                  Search
+                </NavLink>
               </>
             )}
             {auth?.user?.role === "admin" && (
@@ -142,7 +145,7 @@ export default function Navbar({ auth, onLogout }) {
                 </Link>
                 <Link
                   to="/signup"
-                  className="px-4 py-2 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-all shadow-md shadow-primary-500/20 active:scale-95"
+                  className="px-4 py-2 text-sm font-semibold text-white bg-slate-900 border border-slate-900 rounded-lg hover:bg-slate-800 transition-all shadow-md active:scale-95"
                 >
                   Sign Up
                 </Link>
@@ -254,6 +257,14 @@ export default function Navbar({ auth, onLogout }) {
               >
                 Export
               </NavLink>
+              <NavLink
+                to="/search"
+                active={isActive("/search")}
+                onClick={closeMenu}
+                className="block"
+              >
+                Search
+              </NavLink>
             </>
           )}
           {auth?.user?.role === "admin" && (
@@ -289,7 +300,7 @@ export default function Navbar({ auth, onLogout }) {
                 <Link
                   to="/signup"
                   onClick={closeMenu}
-                  className="flex justify-center items-center px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg"
+                  className="flex justify-center items-center px-4 py-2 text-sm font-semibold text-white bg-slate-900 border border-slate-900 rounded-lg hover:bg-slate-800 transition-colors"
                 >
                   Sign Up
                 </Link>

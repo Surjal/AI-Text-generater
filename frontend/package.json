@@ -10,7 +10,9 @@
   },
   "dependencies": {
     "axios": "*",
+    "framer-motion": "12.38.0",
     "jspdf": "^4.2.1",
+    "lucide-react": "^1.8.0",
     "react": "*",
     "react-dom": "*",
     "react-router-dom": "^6.22.3"

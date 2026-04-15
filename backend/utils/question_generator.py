@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 
 import networkx as nx
 import numpy as np
@@ -12,6 +12,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from .preprocess import sentence_tokenize, preprocess_sentence_text
+from .ai_service import AIService
 
 
 COPULA_VERBS = {"is", "are", "was", "were", "has", "have", "does", "do", "did"}
@@ -204,31 +205,42 @@ def _statement_to_question(sentence: str) -> str:
     return _capitalize_first(f"{wh_word} {sent_no_end}?")
 
 
-def generate_questions(text: str, question_count: int = 5) -> List[str]:
+def generate_questions(text: str, question_count: int = 5, difficulty: str = "medium") -> List[Dict[str, Any]]:
     """
-    Generate important question candidates using:
-    - TextRank sentence ranking
-    - Rule-based WH-question transformation
+    Enhanced question generation using context-aware LLM.
+    Falls back to rule-based logic if LLM fails.
     """
     question_count = max(1, int(question_count))
+    
+    # Try LLM generation
+    llm_questions = AIService.generate_questions(text, question_count, difficulty)
+    if llm_questions:
+        return llm_questions
+
+    # Fallback to rule-based
     sentences = sentence_tokenize(text)
     if not sentences:
         return []
 
-    # Rank sentences and convert top ones.
     top_indices = _build_textrank_ranking(sentences, top_k=min(question_count, len(sentences)))
     selected = [sentences[i] for i in top_indices]
 
-    questions: List[str] = []
+    questions: List[Dict[str, Any]] = []
     seen = set()
     for sent in selected:
-        q = _statement_to_question(sent)
-        if not q:
+        q_text = _statement_to_question(sent)
+        if not q_text:
             continue
-        q_norm = q.strip()
-        if q_norm and q_norm.lower() not in seen:
-            seen.add(q_norm.lower())
-            questions.append(q_norm)
+        q_norm = q_text.strip().lower()
+        if q_norm and q_norm not in seen:
+            seen.add(q_norm)
+            questions.append({
+                "type": "conceptual",
+                "question": q_text,
+                "answer": sent,
+                "difficulty": difficulty,
+                "topic": "General"
+            })
 
     return questions[:question_count]
 
@@ -297,8 +309,15 @@ def _build_distractors(answer: str, pool: List[str], count: int = 3) -> List[str
     return candidates[:count]
 
 
-def generate_mcq_items(text: str, question_count: int = 5) -> List[dict]:
-    """Generate MCQ items from text using heuristic question generation."""
+def generate_mcq_items(text: str, question_count: int = 5, difficulty: str = "medium") -> List[dict]:
+    """Generate MCQ items using LLM with rule-based fallback."""
+    # Try LLM
+    questions = AIService.generate_questions(text, question_count, difficulty)
+    mcqs = [q for q in questions if q.get("type") == "mcq"]
+    if len(mcqs) >= question_count:
+        return mcqs[:question_count]
+
+    # Fallback to rule-based (existing logic)
     question_count = max(0, int(question_count))
     if question_count <= 0:
         return []
@@ -314,8 +333,8 @@ def generate_mcq_items(text: str, question_count: int = 5) -> List[dict]:
             answer_pool.append(answer)
 
     top_indices = _build_textrank_ranking(sentences, top_k=min(len(sentences), question_count * 2))
-    items: List[dict] = []
-    seen_questions = set()
+    items: List[dict] = mcqs # Start with whatever LLM gave us
+    seen_questions = {q.get("question", "").strip().lower() for q in items}
 
     for idx in top_indices:
         if len(items) >= question_count:
@@ -341,10 +360,13 @@ def generate_mcq_items(text: str, question_count: int = 5) -> List[dict]:
 
         items.append(
             {
+                "type": "mcq",
                 "question": question,
                 "options": options,
                 "correct_index": options.index(answer),
                 "answer": answer,
+                "difficulty": difficulty,
+                "topic": "General"
             }
         )
         seen_questions.add(question_norm)
@@ -353,7 +375,7 @@ def generate_mcq_items(text: str, question_count: int = 5) -> List[dict]:
 
 
 def generate_fill_blank_items(text: str, item_count: int = 5) -> List[dict]:
-    """Generate fill-in-the-blank items from text using extracted answer phrases."""
+    """Generate fill-in-the-blank items from text."""
     item_count = max(0, int(item_count))
     if item_count <= 0:
         return []
@@ -381,7 +403,7 @@ def generate_fill_blank_items(text: str, item_count: int = 5) -> List[dict]:
         if prompt_norm in seen_prompts:
             continue
 
-        items.append({"prompt": prompt.strip(), "answer": answer})
+        items.append({"prompt": prompt.strip(), "answer": answer, "type": "fill_blank"})
         seen_prompts.add(prompt_norm)
 
     return items[:item_count]

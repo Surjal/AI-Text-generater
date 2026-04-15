@@ -46,6 +46,7 @@ class DatabaseManager:
                     topic TEXT,
                     mcq_items TEXT,
                     fill_blank_items TEXT,
+                    embedding BLOB,
                     FOREIGN KEY (username) REFERENCES users (username)
                 )
             ''')
@@ -68,7 +69,7 @@ class DatabaseManager:
                 )
             ''')
             
-            # Quiz Attempts table (for features 1, 3, 5)
+            # Quiz Attempts table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS quiz_attempts (
                     id TEXT PRIMARY KEY,
@@ -88,7 +89,7 @@ class DatabaseManager:
                 )
             ''')
             
-            # Question Performance table (for features 1, 3, 9)
+            # Question Performance table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS question_performance (
                     id TEXT PRIMARY KEY,
@@ -107,7 +108,7 @@ class DatabaseManager:
                 )
             ''')
             
-            # Answer Explanations table (for feature 9)
+            # Answer Explanations table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS answer_explanations (
                     id TEXT PRIMARY KEY,
@@ -121,7 +122,7 @@ class DatabaseManager:
                 )
             ''')
             
-            # Study Recommendations table (for feature 6)
+            # Study Recommendations table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS study_recommendations (
                     id TEXT PRIMARY KEY,
@@ -136,7 +137,7 @@ class DatabaseManager:
                 )
             ''')
             
-            # Spaced Repetition Schedule table (for feature 1)
+            # Spaced Repetition Schedule table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS spaced_repetition (
                     id TEXT PRIMARY KEY,
@@ -259,9 +260,10 @@ class DatabaseManager:
     def add_history(self, username: str, entry: Dict[str, Any]):
         conn = self._get_connection()
         try:
+            embedding_blob = sqlite3.Binary(json.dumps(entry.get('embedding', [])).encode()) if entry.get('embedding') else None
             conn.execute('''
-                INSERT INTO history (id, username, created_at, summary, source_label, keywords, key_points, title, topic, mcq_items, fill_blank_items)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO history (id, username, created_at, summary, source_label, keywords, key_points, title, topic, mcq_items, fill_blank_items, embedding)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 entry['id'],
                 username,
@@ -273,7 +275,8 @@ class DatabaseManager:
                 entry.get('title', ''),
                 entry.get('topic', ''),
                 json.dumps(entry.get('mcq_items', [])),
-                json.dumps(entry.get('fill_blank_items', []))
+                json.dumps(entry.get('fill_blank_items', [])),
+                embedding_blob
             ))
             conn.commit()
         finally:
@@ -296,6 +299,34 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def semantic_search(self, username: str, query_embedding: List[float], limit: int = 5) -> List[Dict[str, Any]]:
+        """Perform semantic search using cosine similarity on embeddings"""
+        import numpy as np
+        
+        conn = self._get_connection()
+        try:
+            rows = conn.execute('SELECT * FROM history WHERE username = ? AND embedding IS NOT NULL', (username,)).fetchall()
+            results = []
+            for row in rows:
+                row_dict = dict(row)
+                if row_dict['embedding']:
+                    stored_embedding = json.loads(row_dict['embedding'].decode())
+                    # Cosine similarity
+                    similarity = np.dot(query_embedding, stored_embedding) / (np.linalg.norm(query_embedding) * np.linalg.norm(stored_embedding))
+                    row_dict['similarity'] = float(similarity)
+                    
+                    # Cleanup for JSON response
+                    row_dict['keywords'] = json.loads(row_dict['keywords']) if row_dict['keywords'] else []
+                    row_dict['key_points'] = json.loads(row_dict['key_points']) if row_dict['key_points'] else []
+                    row_dict.pop('embedding')
+                    results.append(row_dict)
+            
+            # Sort by similarity
+            results.sort(key=lambda x: x['similarity'], reverse=True)
+            return results[:limit]
+        finally:
+            conn.close()
+
     # Stats Methods
     def increment_stat(self, key: str, amount: int = 1):
         conn = self._get_connection()
@@ -313,7 +344,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    # Quiz Attempts Methods (Features 1, 3, 5)
+    # Quiz Attempts Methods
     def add_quiz_attempt(self, username: str, history_id: str, score: float, total_questions: int,
                         correct_answers: int, time_taken_seconds: int, difficulty_level: str = "medium",
                         is_timed: bool = False, time_limit_seconds: int = None) -> str:
@@ -345,7 +376,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    # Question Performance Methods (Features 1, 3, 9)
+    # Question Performance Methods
     def add_question_performance(self, username: str, quiz_attempt_id: str, question_index: int,
                                 question_text: str, answered_correctly: bool, user_answer: str,
                                 correct_answer: str, explanation: str = None, difficulty_rating: int = 3) -> str:
@@ -365,7 +396,7 @@ class DatabaseManager:
             conn.close()
 
     def get_performance_analytics(self, username: str) -> Dict[str, Any]:
-        """Get comprehensive analytics for a user (Feature 3)"""
+        """Get comprehensive analytics for a user"""
         conn = self._get_connection()
         try:
             total_attempts = conn.execute(
@@ -404,7 +435,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    # Answer Explanations Methods (Feature 9)
+    # Answer Explanations Methods
     def add_explanation(self, history_id: str, question_index: int, question_text: str,
                        explanation: str, misconceptions: List[str] = None) -> str:
         import secrets
@@ -436,7 +467,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    # Study Recommendations Methods (Feature 6)
+    # Study Recommendations Methods
     def add_recommendation(self, username: str, recommended_topic: str, reason: str,
                          difficulty_level: str, priority_score: float) -> str:
         import secrets
@@ -466,7 +497,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    # Spaced Repetition Methods (Feature 1)
+    # Spaced Repetition Methods
     def add_spaced_repetition(self, username: str, history_id: str) -> str:
         import secrets
         conn = self._get_connection()
@@ -517,35 +548,44 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def update_spaced_repetition(self, sr_id: str, correct: bool):
-        """Update spaced repetition based on review result"""
-        import math
+    def update_spaced_repetition(self, sr_id: str, quality: int):
+        """
+        Update spaced repetition based on review result (SM-2 Algorithm).
+        quality: 0-5 scale (0=forgot, 5=perfect)
+        """
         conn = self._get_connection()
         try:
             sr = conn.execute('SELECT * FROM spaced_repetition WHERE id = ?', (sr_id,)).fetchone()
             if not sr:
                 return
             
-            ease_factor = sr['ease_factor']
-            interval_days = sr['interval_days']
-            review_count = sr['review_count'] + 1
+            n = sr['review_count']
+            ef = sr['ease_factor']
+            i = sr['interval_days']
             
-            # SMv2 algorithm adjustments
-            if correct:
-                ease_factor = min(2.5, max(1.3, ease_factor + 0.1))
-                interval_days = max(1, int(interval_days * ease_factor))
+            if quality >= 3:
+                if n == 0:
+                    i = 1
+                elif n == 1:
+                    i = 6
+                else:
+                    i = round(i * ef)
+                n += 1
             else:
-                ease_factor = max(1.3, ease_factor - 0.2)
-                interval_days = 1
-                review_count = max(0, review_count - 1)
+                n = 0
+                i = 1
             
-            next_review = time.time() + (interval_days * 24 * 3600)
+            ef = ef + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02))
+            if ef < 1.3:
+                ef = 1.3
+                
+            next_review = time.time() + (i * 24 * 3600)
             
             conn.execute('''
                 UPDATE spaced_repetition SET ease_factor = ?, interval_days = ?, review_count = ?,
                 next_review_date = ?, last_reviewed_at = ?
                 WHERE id = ?
-            ''', (ease_factor, interval_days, review_count, next_review, time.time(), sr_id))
+            ''', (ef, i, n, next_review, time.time(), sr_id))
             conn.commit()
         finally:
             conn.close()

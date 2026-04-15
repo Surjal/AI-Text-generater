@@ -272,6 +272,9 @@ export default function Chatbot({ auth }) {
   const [revealedFib, setRevealedFib] = useState({});
   const [gradeMcq, setGradeMcq] = useState({});
   const [gradeFib, setGradeFib] = useState({});
+  const [mcqExplanations, setMcqExplanations] = useState({});
+  const [fibExplanations, setFibExplanations] = useState({});
+  const [loadingExplanations, setLoadingExplanations] = useState({});
   const [currentHistoryId, setCurrentHistoryId] = useState("");
   const [quizAttemptStatus, setQuizAttemptStatus] = useState("");
 
@@ -543,7 +546,7 @@ export default function Chatbot({ auth }) {
     setShowHistory(false);
   }
 
-  function checkMcq(idx) {
+  async function checkMcq(idx) {
     const item = mcqItems[idx];
     if (!item) return;
     const picked = normalizeIndex(mcqPick[idx]);
@@ -554,9 +557,27 @@ export default function Chatbot({ auth }) {
       [idx]: picked === correctIndex ? "correct" : "wrong",
     }));
     setRevealedMcq((r) => ({ ...r, [idx]: true }));
+
+    // Fetch AI explanation
+    if (auth?.token) {
+      setLoadingExplanations((prev) => ({ ...prev, [`mcq-${idx}`]: true }));
+      try {
+        const res = await axios.post("/api/explanations", {
+          question: item.question,
+          correct_answer: item.options[correctIndex],
+          user_answer: item.options[picked],
+          context: summary,
+        });
+        setMcqExplanations((prev) => ({ ...prev, [idx]: res.data }));
+      } catch (err) {
+        console.error("Failed to fetch explanation", err);
+      } finally {
+        setLoadingExplanations((prev) => ({ ...prev, [`mcq-${idx}`]: false }));
+      }
+    }
   }
 
-  function checkFib(idx) {
+  async function checkFib(idx) {
     const item = fillBlankItems[idx];
     if (!item) return;
     const ans = normalizeBlankAnswers(fibAnswers[idx]);
@@ -566,6 +587,26 @@ export default function Chatbot({ auth }) {
       [idx]: fibMatches(ans, item.answer) ? "correct" : "wrong",
     }));
     setRevealedFib((r) => ({ ...r, [idx]: true }));
+
+    // Fetch AI explanation
+    if (auth?.token) {
+      setLoadingExplanations((prev) => ({ ...prev, [`fib-${idx}`]: true }));
+      try {
+        const res = await axios.post("/api/explanations", {
+          question: item.prompt,
+          correct_answer: Array.isArray(item.answer)
+            ? item.answer.join(", ")
+            : item.answer,
+          user_answer: ans.join(", "),
+          context: summary,
+        });
+        setFibExplanations((prev) => ({ ...prev, [idx]: res.data }));
+      } catch (err) {
+        console.error("Failed to fetch explanation", err);
+      } finally {
+        setLoadingExplanations((prev) => ({ ...prev, [`fib-${idx}`]: false }));
+      }
+    }
   }
 
   function onExportPdf() {
@@ -1236,12 +1277,34 @@ export default function Chatbot({ auth }) {
                                   </button>
                                 )}
                                 {revealedMcq[idx] && (
-                                  <div
-                                    className={`flex items-center gap-2 font-bold text-sm ${gradeMcq[idx] === "correct" ? "text-emerald-600" : "text-red-500"}`}
-                                  >
-                                    {gradeMcq[idx] === "correct"
-                                      ? "✓ Excellent!"
-                                      : `✗ Not quite. The correct answer was ${String.fromCharCode(65 + item.correct_index)}.`}
+                                  <div className="flex flex-col gap-4">
+                                    <div
+                                      className={`flex items-center gap-2 font-bold text-sm ${gradeMcq[idx] === "correct" ? "text-emerald-600" : "text-red-500"}`}
+                                    >
+                                      {gradeMcq[idx] === "correct"
+                                        ? "✓ Excellent!"
+                                        : `✗ Not quite. The correct answer was ${String.fromCharCode(65 + item.correct_index)}.`}
+                                    </div>
+                                    
+                                    {loadingExplanations[`mcq-${idx}`] && (
+                                      <div className="flex items-center gap-2 text-slate-400 text-xs italic animate-pulse">
+                                        <div className="w-4 h-4 border-2 border-slate-200 border-t-slate-400 rounded-full animate-spin" />
+                                        Generating AI explanation...
+                                      </div>
+                                    )}
+
+                                    {mcqExplanations[idx] && (
+                                      <div className="p-4 bg-primary-50 rounded-2xl border border-primary-100 animate-in fade-in slide-in-from-top-2">
+                                        <p className="text-sm text-slate-700 leading-relaxed">
+                                          <span className="font-bold text-primary-700">AI Explanation:</span> {mcqExplanations[idx].explanation}
+                                        </p>
+                                        {mcqExplanations[idx].misconception && gradeMcq[idx] === "wrong" && (
+                                          <p className="text-xs text-red-600 mt-2 italic">
+                                            Tip: {mcqExplanations[idx].misconception}
+                                          </p>
+                                        )}
+                                      </div>
+                                    )}
                                   </div>
                                 )}
                               </div>
@@ -1309,23 +1372,45 @@ export default function Chatbot({ auth }) {
                                   </button>
                                 )}
                                 {revealedFib[idx] && (
-                                  <div
-                                    className={`flex flex-col gap-2 font-bold text-sm ${gradeFib[idx] === "correct" ? "text-emerald-600" : "text-red-500"}`}
-                                  >
-                                    <span>
-                                      {gradeFib[idx] === "correct"
-                                        ? "✓ Spot on!"
-                                        : "✗ Almost there."}
-                                    </span>
-                                    {gradeFib[idx] === "wrong" && (
-                                      <span className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-slate-500 font-medium">
-                                        Correct answer:{" "}
-                                        <span className="text-slate-900">
-                                          {Array.isArray(item.answer)
-                                            ? item.answer.join(", ")
-                                            : item.answer}
-                                        </span>
+                                  <div className="flex flex-col gap-4">
+                                    <div
+                                      className={`flex flex-col gap-2 font-bold text-sm ${gradeFib[idx] === "correct" ? "text-emerald-600" : "text-red-500"}`}
+                                    >
+                                      <span>
+                                        {gradeFib[idx] === "correct"
+                                          ? "✓ Spot on!"
+                                          : "✗ Almost there."}
                                       </span>
+                                      {gradeFib[idx] === "wrong" && (
+                                        <span className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-slate-500 font-medium">
+                                          Correct answer:{" "}
+                                          <span className="text-slate-900">
+                                            {Array.isArray(item.answer)
+                                              ? item.answer.join(", ")
+                                              : item.answer}
+                                          </span>
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {loadingExplanations[`fib-${idx}`] && (
+                                      <div className="flex items-center gap-2 text-slate-400 text-xs italic animate-pulse">
+                                        <div className="w-4 h-4 border-2 border-slate-200 border-t-slate-400 rounded-full animate-spin" />
+                                        Generating AI explanation...
+                                      </div>
+                                    )}
+
+                                    {fibExplanations[idx] && (
+                                      <div className="p-4 bg-primary-50 rounded-2xl border border-primary-100 animate-in fade-in slide-in-from-top-2">
+                                        <p className="text-sm text-slate-700 leading-relaxed">
+                                          <span className="font-bold text-primary-700">AI Explanation:</span> {fibExplanations[idx].explanation}
+                                        </p>
+                                        {fibExplanations[idx].misconception && gradeFib[idx] === "wrong" && (
+                                          <p className="text-xs text-red-600 mt-2 italic">
+                                            Tip: {fibExplanations[idx].misconception}
+                                          </p>
+                                        )}
+                                      </div>
                                     )}
                                   </div>
                                 )}
