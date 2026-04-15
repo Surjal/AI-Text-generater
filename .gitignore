@@ -1,0 +1,48 @@
+# Python virtual environments
+.venv/
+.venv_run/
+backend/.venv/
+backend/.venv_run/
+backend/.venv_old/
+
+# Python cache
+**/__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+.pytest_cache/
+
+# Node and frontend build output
+frontend/node_modules/
+frontend/dist/
+
+# Local IDE settings
+.vscode/
+.idea/
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime data
+*.log
+*.sqlite3
+*.db
+backend/summarizer.db
+
+# ML model artifacts and large checkpoints
+models/
+checkpoints/
+cache/
+*.pt
+*.pth
+*.bin
+*.onnx
+*.ckpt
+*.safetensors
+*.h5
+
+# Misc
+.DS_Store
+Thumbs.db
