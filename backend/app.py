@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import wraps
 import hashlib
+import os
 import re
 import secrets
 import time
@@ -93,8 +94,18 @@ def admin_required(f):
 
 @app.after_request
 def add_cors_headers(response):
-    # Simple CORS for local development. In production, restrict this.
-    response.headers["Access-Control-Allow-Origin"] = "*"
+    frontend_origin = os.environ.get("FRONTEND_ORIGIN", "").strip()
+    request_origin = request.headers.get("Origin", "").strip()
+
+    if frontend_origin:
+        response.headers["Access-Control-Allow-Origin"] = frontend_origin
+        response.headers["Vary"] = "Origin"
+    elif request_origin:
+        response.headers["Access-Control-Allow-Origin"] = request_origin
+        response.headers["Vary"] = "Origin"
+    else:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
@@ -661,4 +672,8 @@ def export_study_material():
 
 if __name__ == "__main__":
     ensure_nltk_resources()
-    app.run(host="127.0.0.1", port=5001, debug=True)
+    app.run(
+        host=os.environ.get("HOST", "0.0.0.0"),
+        port=int(os.environ.get("PORT", "5001")),
+        debug=True,
+    )

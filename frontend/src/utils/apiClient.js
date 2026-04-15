@@ -1,8 +1,12 @@
 import { loadSession } from "./authStorage";
 
-const API_BASE_URL = "/api";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 
 function resolveApiPath(path) {
+  if (API_BASE_URL.startsWith("http")) {
+    return `${API_BASE_URL.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+  }
+
   if (path.startsWith("/api")) {
     return path;
   }
@@ -36,7 +40,6 @@ export function buildApiHeaders(extraHeaders = {}) {
 export async function apiFetch(path, options = {}) {
   const { headers, ...rest } = options;
   return fetch(resolveApiPath(path), {
-    credentials: "include",
     ...rest,
     headers: buildApiHeaders(headers),
   });
