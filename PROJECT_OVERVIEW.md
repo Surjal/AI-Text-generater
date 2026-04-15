@@ -70,6 +70,28 @@
   - `study_recommendations`
   - `spaced_repetition`
 
+- ER-style relationship summary:
+  - `users (1) -> (many) tokens`
+    - `tokens.username` references `users.username`
+  - `users (1) -> (many) history`
+    - `history.username` references `users.username`
+  - `users (1) -> (many) quiz_attempts`
+    - `quiz_attempts.username` references `users.username`
+  - `history (1) -> (many) quiz_attempts`
+    - `quiz_attempts.history_id` references `history.id`
+  - `quiz_attempts (1) -> (many) question_performance`
+    - `question_performance.quiz_attempt_id` references `quiz_attempts.id`
+  - `users (1) -> (many) question_performance`
+    - `question_performance.username` references `users.username`
+  - `history (1) -> (many) answer_explanations`
+    - `answer_explanations.history_id` references `history.id`
+  - `users (1) -> (many) study_recommendations`
+    - `study_recommendations.username` references `users.username`
+  - `users (1) -> (many) spaced_repetition`
+    - `spaced_repetition.username` references `users.username`
+  - `history (1) -> (many) spaced_repetition`
+    - `spaced_repetition.history_id` references `history.id`
+
 ## 4. Frontend
 
 - React with Vite.
